@@ -1,0 +1,68 @@
+# Copies the game's player list into the site, then publishes the site to GitHub Pages.
+# Runs on every upload to main, once a day, and on demand (Actions tab > Run workflow).
+# If the copy fails or the file looks wrong, the run fails and the previous site stays live.
+name: Refresh player data and deploy
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 18 * * *'   # daily, 04:17 AEST / 05:17 AEDT
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  PLAYERS_URL: https://23-0.com/data/players/players.json
+  SITE_DIR: _site
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Fetch players.json from 23-0.com
+        run: |
+          set -euo pipefail
+          mkdir -p "$SITE_DIR"
+          curl -fsSL --retry 3 --retry-delay 15 \
+            -A "Mozilla/5.0 (compatible; 23-0-ratings mirror; https://github.com/markjovic/23-0-ratings)" \
+            "$PLAYERS_URL" -o "$SITE_DIR/players.json"
+          if ! jq -e '(.players | type == "array" and length > 0) and (.baselines | type == "object")' "$SITE_DIR/players.json" > /dev/null; then
+            echo "::error::players.json is not the expected format"; head -c 300 "$SITE_DIR/players.json"; exit 1
+          fi
+          COUNT=$(jq '.players | length' "$SITE_DIR/players.json")
+          printf '{"fetchedAt":"%s","count":%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$COUNT" > "$SITE_DIR/players-meta.json"
+          echo "Fetched $COUNT player stints"
+
+      - name: Add site files
+        run: |
+          set -euo pipefail
+          for f in index.html ratings.json; do
+            if [ ! -f "$f" ]; then echo "::error::$f is missing from the repository"; exit 1; fi
+            cp "$f" "$SITE_DIR/"
+          done
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
