@@ -12,7 +12,7 @@
   const DECADES = [1990, 2000, 2010, 2020];
   const CLUB_LINE = /^([A-Z]{2,3}) \u00b7 (\d{4})s$/;
   const SLOT_LINE = /^(DEF|MID|RUC|FWD|UTL)$/;
-  const VERSION = 'v10';
+  const VERSION = 'v11';
   const SIMS_PICK = 500;        // simulated futures per candidate pick
 
   // ---------- panel ----------
@@ -243,7 +243,12 @@
     const leafs = e => [...e.querySelectorAll('*')].filter(n => !n.children.length && CLUB_LINE.test(n.textContent.trim()) && !n.closest('.r230'));
     let T = 0, lastSig = '', lastForecast = '', lastBanner = '', lastRec = null;
     // picks the overlay saw being made: position -> player (matched by initials against the pool on offer at the time)
-    const memo = {}; let prevPool = [], prevFilled = null;   // prevFilled: positions filled when the bar was last read
+    const memo = {}; let prevPool = [], prevFilled = null, lastTap = null, lastCards = [];
+    // remember which player card was tapped, so the pick can be named when its position fills
+    document.addEventListener('click', e => {
+      const c = lastCards.find(c => c.d.contains?.(e.target));
+      if (c) lastTap = { p: c.p, t: Date.now() };
+    }, true);   // prevFilled: positions filled when the bar was last read
 
     const run = () => {
       const cards = [], unmatched = []; const seen = {};
@@ -255,6 +260,7 @@
         const k = `${ab}|${dc}`; seen[k] = (seen[k] || 0) + 1;
         cards.push({ d, l, p: h[0], k, slot: lines.find(s => SLOT_LINE.test(s)) || null });
       }
+      lastCards = cards;
       const top = Object.entries(seen).sort((a, b) => b[1] - a[1])[0], cur = top && top[1] > 1 ? top[0] : null;
       const resultPage = /PROJECTED RECORD/i.test(document.body.innerText);
       // picks already placed: from the game's stored state, checked against the position bar;
@@ -280,10 +286,12 @@
       }
       if (barFilled) {
         for (const s of Object.keys(memo)) if (!barFilled.some(b => b.slot === s && b.top === initials(memo[s]))) delete memo[s];
-        // only name a pick the overlay actually saw happen: the position was empty last time and filled now,
-        // matched by initials against the club/era that was on offer at that moment (never the current one)
+        // only name a pick the overlay actually saw happen: the position was empty last time and filled now.
+        // First choice: the player card you tapped just before. Otherwise the one player on offer at that
+        // moment with those initials who can play there.
         for (const b of barFilled) if (!memo[b.slot] && prevFilled && !prevFilled.has(b.slot)) {
-          const m = prevPool.filter(p => initials(p) === b.top && fits(p, b.slot) && p.teamAbbr !== cur?.split('|')[0]);
+          if (lastTap && Date.now() - lastTap.t < 120000 && initials(lastTap.p) === b.top && fits(lastTap.p, b.slot)) { memo[b.slot] = lastTap.p; lastTap = null; continue; }
+          const m = prevPool.filter(p => initials(p) === b.top && fits(p, b.slot));
           if (m.length === 1) memo[b.slot] = m[0];
         }
         prevFilled = new Set(barFilled.map(b => b.slot));
