@@ -13,7 +13,7 @@
   const DECADES = [1990, 2000, 2010, 2020];
   const CLUB_LINE = /^([A-Z]{2,3}) \u00b7 (\d{4})s$/;
   const SLOT_LINE = /^(DEF|MID|RUC|FWD|UTL)$/;
-  const VERSION = 'v3';
+  const VERSION = 'v5';
   const SIMS_PICK = 500;        // simulated futures per candidate pick
 
   // ---------- panel ----------
@@ -149,9 +149,36 @@
         return t.length === 2 && SLOT_LINE.test(t[1]) && /^[A-Z]{2,3}$/.test(t[0]);
       });
       const deepest = hits.filter(el => !hits.some(o => o !== el && el.contains?.(o)));
-      const slots = deepest.map(el => { const [top, slot] = el.innerText.split('\n').map(x => x.trim()).filter(Boolean); return { top, slot, filled: top !== slot }; });
+      const slots = deepest.map(el => { const [top, slot] = el.innerText.split('\n').map(x => x.trim()).filter(Boolean); return { top, slot, filled: top !== slot, el }; });
       return new Set(slots.map(x => x.slot)).size === 5 && slots.length === 5 ? slots : null;
     };
+    // Turn anything that looks like a pick ({playerId, teamId, decade} or {player:{...}}) into a player stint.
+    const asPick = o => {
+      if (!o || typeof o !== 'object') return null;
+      const q = o.player && typeof o.player === 'object' ? { ...o.player, ...o } : o;
+      const id = q.playerId ?? q.player?.playerId ?? (typeof q.player === 'number' ? q.player : undefined);
+      if (id == null) return null;
+      const teamId = q.teamId ?? q.team?.id ?? q.team?.teamId, decade = q.decade ?? q.era;
+      const m = PL.filter(p => p.playerId === +id && (teamId == null || p.teamId === +teamId) && (decade == null || p.decade === +decade));
+      return m.length === 1 ? m[0] : null;
+    };
+    // The game is a React app: each position in the bar is rendered from the pick it holds,
+    // so the pick can be read from the component data attached to that element.
+    const reactPick = el => {
+      const fk = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+      if (!fk) return { p: null, react: false };
+      let f = el[fk];
+      for (let i = 0; i < 25 && f; i++, f = f.return) {
+        const props = f.memoizedProps; if (!props || typeof props !== 'object') continue;
+        const vals = [props, ...Object.values(props)];
+        for (const v of vals) {
+          const p = asPick(v); if (p) return { p, react: true };
+          if (v && typeof v === 'object' && !Array.isArray(v)) for (const w of Object.values(v)) { const p2 = asPick(w); if (p2) return { p: p2, react: true }; }
+        }
+      }
+      return { p: null, react: true };
+    };
+
     // The game keeps its state in localStorage "undefeated"; look there for the picks made so far.
     const readStoredPicks = () => {
       let state; try { state = JSON.parse(localStorage.getItem('undefeated') || 'null'); } catch (e) { return { picks: [], note: 'storage unreadable' }; }
@@ -181,7 +208,7 @@
     const leafs = e => [...e.querySelectorAll('*')].filter(n => !n.children.length && CLUB_LINE.test(n.textContent.trim()) && !n.closest('.r230'));
     let T = 0, lastSig = '', lastForecast = '', lastRec = null;
     // picks the overlay saw being made: position -> player (matched by initials against the pool on offer at the time)
-    const memo = {}; let prevPool = [];
+    const memo = {}; let prevPool = [], prevFilled = null;   // prevFilled: positions filled when the bar was last read
 
     const run = () => {
       const cards = [], unmatched = []; const seen = {};
@@ -202,7 +229,14 @@
       let placed = [], pickSource = '';
       const pid = new Set();
       const barFilled = bar ? bar.filter(x => x.filled) : null;
-      if (stored.picks.length && (!barFilled || (stored.picks.length === barFilled.length && barFilled.every(b => stored.picks.some(q => q.slot === b.slot && initials(q.p) === b.top))))) {
+      // 1) the game's own data behind each filled position in the bar
+      let reactSeen = false;
+      if (barFilled && barFilled.length) {
+        const got = barFilled.map(b => { const r = reactPick(b.el); reactSeen = reactSeen || r.react; return r.p && initials(r.p) === b.top ? { p: r.p, slot: b.slot } : null; });
+        if (got.every(Boolean)) { placed = got; pickSource = `picks read from the game page (${placed.length})`; }
+      }
+      if (placed.length) { /* done */ }
+      else if (stored.picks.length && (!barFilled || (stored.picks.length === barFilled.length && barFilled.every(b => stored.picks.some(q => q.slot === b.slot && initials(q.p) === b.top))))) {
         placed = stored.picks.map(q => ({ p: q.p, slot: q.slot })); pickSource = `picks from game storage (${placed.length})`;
       } else {
         for (const c of cards) if (c.slot && c.k !== cur && !pid.has(c.p.playerId)) { pid.add(c.p.playerId); placed.push(c); }
@@ -210,17 +244,20 @@
       }
       if (barFilled) {
         for (const s of Object.keys(memo)) if (!barFilled.some(b => b.slot === s && b.top === initials(memo[s]))) delete memo[s];
-        for (const b of barFilled) if (!memo[b.slot]) {
-          const m = prevPool.filter(p => initials(p) === b.top && fits(p, b.slot));
+        // only name a pick the overlay actually saw happen: the position was empty last time and filled now,
+        // matched by initials against the club/era that was on offer at that moment (never the current one)
+        for (const b of barFilled) if (!memo[b.slot] && prevFilled && !prevFilled.has(b.slot)) {
+          const m = prevPool.filter(p => initials(p) === b.top && fits(p, b.slot) && p.teamAbbr !== cur?.split('|')[0]);
           if (m.length === 1) memo[b.slot] = m[0];
         }
+        prevFilled = new Set(barFilled.map(b => b.slot));
         if (!placed.length && barFilled.length && barFilled.every(b => memo[b.slot])) {
           placed = barFilled.map(b => ({ p: memo[b.slot], slot: b.slot })); pickSource = `picks seen by the overlay (${placed.length})`;
         }
       }
       placed.forEach(c => pid.add(c.p.playerId));
       const unknownPicks = barFilled && barFilled.length > placed.length;
-      if (unknownPicks) pickSource = `PICKS NOT IDENTIFIED: bar shows ${barFilled.length} filled (${barFilled.map(b => b.top + ' ' + b.slot).join(', ')}), found ${placed.length}${stored.note ? '; ' + stored.note : ''}`;
+      if (unknownPicks) pickSource = `PICKS NOT IDENTIFIED (${reactSeen ? 'game data found but no pick in it' : 'no game data on the bar'}): bar shows ${barFilled.length} filled (${barFilled.map(b => b.top + ' ' + b.slot).join(', ')}), found ${placed.length}${stored.note ? '; ' + stored.note : ''}`;
       const open = bar ? bar.filter(x => !x.filled).map(x => x.slot) : SLOTS.filter(s => !placed.some(c => c.slot === s));
       const round = +(document.body.innerText.match(/Round (\d)\/5/) || [])[1] || null;
       if (round && SLOTS.length - open.length !== round - 1) pickSource += ` / CHECK: round ${round} but ${SLOTS.length - open.length} positions filled`;
