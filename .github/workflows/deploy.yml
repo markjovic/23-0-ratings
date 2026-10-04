@@ -52,8 +52,12 @@ jobs:
           set -euo pipefail
           for f in index.html ratings.json; do
             if [ ! -f "$f" ]; then echo "::error::$f is missing from the repository"; exit 1; fi
-            cp "$f" "$SITE_DIR/"
           done
+          # every page and data file at the top of the repo is published (index.html, top-teams.html, ratings.json, hub.json, ...)
+          shopt -s nullglob
+          FILES=(*.html *.json)
+          cp "${FILES[@]}" "$SITE_DIR/"
+          echo "Published: ${FILES[*]}"
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
