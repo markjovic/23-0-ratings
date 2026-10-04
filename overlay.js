@@ -7,13 +7,12 @@
 
   const BASE = 'https://markjovic.github.io/23-0-ratings/';
   const THRESHOLD = 96.65;      // team rating needed for 23-0 to be possible (game shows 96.7); measured 4 Oct 2026
-  const REAL_RATE = 0.32;       // share of real games at or above the threshold that went 23-0 (30 of 94)
   const SIMS = 1200;            // simulated futures per option
   const SLOTS = ['DEF', 'MID', 'RUC', 'FWD', 'UTL'];
   const DECADES = [1990, 2000, 2010, 2020];
   const CLUB_LINE = /^([A-Z]{2,3}) \u00b7 (\d{4})s$/;
   const SLOT_LINE = /^(DEF|MID|RUC|FWD|UTL)$/;
-  const VERSION = 'v5';
+  const VERSION = 'v6';
   const SIMS_PICK = 500;        // simulated futures per candidate pick
 
   // ---------- panel ----------
@@ -206,7 +205,7 @@
 
     // ---------- page reading ----------
     const leafs = e => [...e.querySelectorAll('*')].filter(n => !n.children.length && CLUB_LINE.test(n.textContent.trim()) && !n.closest('.r230'));
-    let T = 0, lastSig = '', lastForecast = '', lastRec = null;
+    let T = 0, lastSig = '', lastForecast = '', lastBanner = '', lastRec = null;
     // picks the overlay saw being made: position -> player (matched by initials against the pool on offer at the time)
     const memo = {}; let prevPool = [], prevFilled = null;   // prevFilled: positions filled when the bar was last read
 
@@ -272,40 +271,50 @@
       const rr = cur ? readRerolls() : {};
 
       // forecast: re-run only when picks, spin or re-roll availability change
-      let rec = null, forecast = '';
+      let rec = null, forecast = '', banner = '';
       const HR = '<hr style="border:0;border-top:1px solid #456;margin:5px 0">';
+      // the advice banner at the top of the panel: one colour per kind of advice
+      const BAN = (bg, fg, head, sub) => `<div style="background:${bg};color:${fg};border-radius:6px;padding:7px 9px;margin:-2px -3px 6px;font:800 15px/1.2 system-ui,sans-serif;letter-spacing:.01em">${head}${sub ? `<div style="font:600 12px/1.3 system-ui,sans-serif;margin-top:3px">${sub}</div>` : ''}</div>`;
+      const GREEN = '#15803d', CLUBC = '#f59e0b', ERAC = '#7c3aed', RED = '#c62828', GREY = '#546e7a';
       if (cur && !resultPage) {
         const sig = placed.map(c => c.p.playerId + c.slot).sort().join() + '|' + cur + '|' + open.join() + '|' + rr.Club + rr.Era;
-        if (!bar) forecast = HR + `<b style="color:#ffb74d">No forecast:</b> the position bar wasn't found, so open positions are unknown.`;
-        else if (unknownPicks) forecast = HR + `<b style="color:#ffb74d">No forecast:</b> the players already picked couldn't be identified, so the team rating so far is unknown. Run the bookmarklet before your first pick and it will follow every pick.`;
-        else if (sig === lastSig) { forecast = lastForecast; rec = lastRec; }
+        if (!bar) banner = BAN(GREY, '#fff', 'NO ADVICE', "The position bar wasn't found, so open positions are unknown.");
+        else if (unknownPicks) banner = BAN(GREY, '#fff', 'NO ADVICE', "Earlier picks couldn't be identified, so the team so far is unknown.");
+        else if (sig === lastSig) { forecast = lastForecast; banner = lastBanner; rec = lastRec; }
         else {
           const mxAll = maxFree(st), mxHere = maxHere(st, pool);
           // candidate picks: the top two players for each open position on this spin
           const cands = []; for (const s of open) for (const [p] of (best[s] || []).slice(0, 2)) cands.push({ p, s });
           const scored = cands.map(c => ({ ...c, r: R1(c.p, c.s), pr: simulate(st, c, SIMS_PICK) })).sort((a, b) => b.pr - a.pr || b.r - a.r);
           rec = scored[0] || null;
-          let f = HR;
-          if (mxAll === null || mxAll < THRESHOLD) f += `<b style="color:#ff8a80">23-0 is no longer possible.</b> Best reachable ${mxAll ? mxAll.toFixed(2) : '-'}, needs ${THRESHOLD}.`;
-          else {
-            f += `Best reachable: ${mxAll.toFixed(2)}; taking from this spin: ${mxHere ? mxHere.toFixed(2) : '-'}`;
-            if (!mxHere || mxHere < THRESHOLD) f += `<br><b style="color:#ff8a80">Dead spin: nothing here can lead to 23-0.</b>`;
-            f += `<br>Chance of reaching ${THRESHOLD} with each pick:`;
-            for (const c of scored.slice(0, 4)) f += `<br>&nbsp; ${c === rec ? '\u2605\u2605 ' : ''}${esc(c.p.name)} at ${c.s} (${c.r.toFixed(1)}): <b>${pct(c.pr)}</b>`;
-            const opts = [];
-            for (const [name, key] of [['Club', 'club'], ['Era', 'era']]) {
-              if (rr[name] === false) continue;                       // used up: don't offer it
-              opts.push({ name, pr: simulate(st, key, SIMS), known: rr[name] === true });
-            }
-            for (const o of opts) f += `<br>&nbsp; ${o.name} re-roll${o.known ? '' : ' (availability unknown)'}: <b>${pct(o.pr)}</b>`;
-            const top = opts.sort((a, b) => b.pr - a.pr)[0];
-            const pickP = rec ? rec.pr : 0;
-            f += `<br><b>${top && top.pr - pickP >= 0.03 ? `Use the ${top.name.toLowerCase()} re-roll (+${Math.round((top.pr - pickP) * 100)} pts).` : rec ? `Take ${esc(rec.p.name)} at ${rec.s}.` : 'Nothing to pick here.'}</b>`;
-            f += `<br>Real chance of 23-0 with that: about ${pct(Math.max(pickP, top ? top.pr : 0) * REAL_RATE)}`;
-            if (rr.Club === false && rr.Era === false) f += `<br><small>Both re-rolls used.</small>`;
+          const opts = [];
+          for (const [name, key] of [['Club', 'club'], ['Era', 'era']]) {
+            if (rr[name] === false) continue;                       // used up: never suggest it
+            opts.push({ name, pr: simulate(st, key, SIMS), known: rr[name] === true });
           }
-          f += `<br><small>Chances assume the best pick on each later spin and no further re-rolls; real chance uses the measured ${Math.round(REAL_RATE * 100)}% of 96.7+ teams that went 23-0.</small>`;
-          lastSig = sig; lastForecast = forecast = f; lastRec = rec;
+          const top = [...opts].sort((a, b) => b.pr - a.pr)[0], pickP = rec ? rec.pr : 0;
+          const takeLine = rec ? `${esc(rec.p.name)} at ${rec.s} (${rec.r.toFixed(1)})` : 'nothing';
+          let f = HR;
+          if (mxAll === null || mxAll < THRESHOLD) {
+            banner = BAN(RED, '#fff', '23-0 NOT POSSIBLE', `Best team still reachable rates ${mxAll ? mxAll.toFixed(2) : '-'}; 23-0 needs ${THRESHOLD} (shows 96.7).${rec ? ` Highest-rated pick: ${takeLine}.` : ''}`);
+          } else {
+            if (top && top.pr - pickP >= 0.03) {
+              const era = top.name === 'Era';
+              banner = BAN(era ? ERAC : CLUBC, era ? '#fff' : '#1a1a1a', `RE-ROLL ${top.name.toUpperCase()}`,
+                `Chance of 23-0: ${pct(pickP)} if you pick now, ${pct(top.pr)} after the ${top.name.toLowerCase()} re-roll.${top.known ? '' : ' (Couldn\'t confirm this re-roll is still available.)'}`);
+            } else if (rec && (!mxHere || mxHere < THRESHOLD)) {
+              banner = BAN(RED, '#fff', 'DEAD SPIN', `Nothing here can lead to 23-0${opts.length ? ' and a re-roll doesn\'t help enough' : ' and no re-rolls are left'}. Best pick: ${takeLine}.`);
+            } else if (rec) {
+              banner = BAN(GREEN, '#fff', `TAKE ${esc(rec.p.name.toUpperCase())} AT ${rec.s}`, `Rating ${rec.r.toFixed(1)}. Chance of 23-0 from here: ${pct(pickP)}.`);
+            } else banner = BAN(GREY, '#fff', 'NOTHING TO PICK', 'No player here fits an open position.');
+            f += `Best reachable: ${mxAll.toFixed(2)}; taking from this spin: ${mxHere ? mxHere.toFixed(2) : '-'}`;
+            f += `<br>Chance of 23-0 with each choice:`;
+            for (const c of scored.slice(0, 4)) f += `<br>&nbsp; ${c === rec ? '\u2605\u2605 ' : ''}${esc(c.p.name)} at ${c.s} (${c.r.toFixed(1)}): <b>${pct(c.pr)}</b>`;
+            for (const o of opts) f += `<br>&nbsp; <span style="color:${o.name === 'Era' ? '#c4b5fd' : '#fcd34d'}">${o.name} re-roll</span>${o.known ? '' : ' (availability unknown)'}: <b>${pct(o.pr)}</b>`;
+            if (!opts.length) f += `<br><small>Both re-rolls used.</small>`;
+          }
+          f += `<br><small>Chance of 23-0 = chance of finishing at ${THRESHOLD}+ (game shows 96.7+), assuming the best pick on each later spin and no further re-rolls.</small>`;
+          lastSig = sig; lastForecast = forecast = f; lastBanner = banner; lastRec = rec;
         }
       }
 
@@ -330,7 +339,7 @@
         else z = `Team rating: found ${t.length} of 5 picks with a position.`;
       } else if (cur) {
         const [ab, dc] = cur.split('|');
-        z = `<b>${esc(ab)} ${dc}s</b> &middot; open: ${open.join(', ') || 'none'}${placed.length ? ` &middot; picked ${placed.length}` : ''}`;
+        z = banner + `<b>${esc(ab)} ${dc}s</b> &middot; open: ${open.join(', ') || 'none'}${placed.length ? ` &middot; picked ${placed.length}` : ''}`;
         for (const s of open) { const e = best[s]; z += `<br>${s}: ${e ? `<b>${esc(e[0][0].name)}</b> ${fmt(e[0][1])}${e[1] ? ` (next ${esc(e[1][0].name)} ${fmt(e[1][1])})` : ''}` : 'none'}`; }
         z += forecast;
 
