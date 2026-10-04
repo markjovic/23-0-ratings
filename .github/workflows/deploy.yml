@@ -53,9 +53,9 @@ jobs:
           for f in index.html ratings.json; do
             if [ ! -f "$f" ]; then echo "::error::$f is missing from the repository"; exit 1; fi
           done
-          # every page and data file at the top of the repo is published (index.html, top-teams.html, ratings.json, hub.json, ...)
+          # every page, script and data file at the top of the repo is published (index.html, top-teams.html, overlay.js, ratings.json, hub.json, ...)
           shopt -s nullglob
-          FILES=(*.html *.json)
+          FILES=(*.html *.json *.js)
           cp "${FILES[@]}" "$SITE_DIR/"
           echo "Published: ${FILES[*]}"
 
