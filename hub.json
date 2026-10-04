@@ -1,0 +1,6 @@
+{
+  "pages": [
+    { "path": "index.html", "title": "All player ratings", "description": "Every player in every position, with filters and the overlay bookmarklet" },
+    { "path": "top-teams.html", "title": "Best possible teams", "description": "The 95 highest-rated teams you can pick" }
+  ]
+}
