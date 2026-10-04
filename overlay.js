@@ -126,9 +126,48 @@
       return best;
     }
 
+    // ---------- the position bar at the bottom of the pick screen ----------
+    // Each slot shows two lines: initials + position when filled, position + position when empty.
+    const readBar = () => {
+      const hits = [...document.body.querySelectorAll('*')].filter(el => {
+        if (el.closest('.r230') || el === P || P.contains?.(el)) return false;
+        const t = (el.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
+        return t.length === 2 && SLOT_LINE.test(t[1]) && /^[A-Z]{2,3}$/.test(t[0]);
+      });
+      const deepest = hits.filter(el => !hits.some(o => o !== el && el.contains?.(o)));
+      const slots = deepest.map(el => { const [top, slot] = el.innerText.split('\n').map(x => x.trim()).filter(Boolean); return { top, slot, filled: top !== slot }; });
+      return new Set(slots.map(x => x.slot)).size === 5 && slots.length === 5 ? slots : null;
+    };
+    // The game keeps its state in localStorage "undefeated"; look there for the picks made so far.
+    const readStoredPicks = () => {
+      let state; try { state = JSON.parse(localStorage.getItem('undefeated') || 'null'); } catch (e) { return { picks: [], note: 'storage unreadable' }; }
+      const found = [];
+      const walk = (v, depth) => { if (!v || depth > 6) return;
+        if (Array.isArray(v)) { const items = v.map(x => {
+            const o = x && (x.player && typeof x.player === 'object' ? { ...x.player, ...x } : x);
+            const id = o?.playerId ?? o?.player?.playerId ?? (typeof o?.player === 'number' ? o.player : undefined);
+            const slot = o?.position ?? o?.slot ?? o?.pos;
+            return id != null && SLOT_LINE.test(String(slot)) ? { id: +id, teamId: o.teamId ?? o.team?.id, decade: o.decade ?? o.era, slot: String(slot) } : null; });
+          if (items.length && items.every(Boolean)) found.push(items);
+          v.forEach(x => walk(x, depth + 1)); return; }
+        if (typeof v === 'object') Object.values(v).forEach(x => walk(x, depth + 1)); };
+      walk(state, 0);
+      const best = found.sort((a, b) => b.length - a.length)[0] || [];
+      const picks = [];
+      for (const q of best) {
+        const m = PL.filter(p => p.playerId === q.id && (q.teamId == null || p.teamId === +q.teamId) && (q.decade == null || p.decade === +q.decade));
+        if (m.length !== 1) return { picks: [], note: `stored pick ${q.id} matched ${m.length} players` };
+        picks.push({ p: m[0], slot: q.slot });
+      }
+      return { picks, note: best.length ? 'storage' : 'no picks in storage' };
+    };
+    const initials = p => (p.name.split(' ')[0][0] + p.name.split(' ').slice(-1)[0][0]).toUpperCase();
+
     // ---------- page reading ----------
     const leafs = e => [...e.querySelectorAll('*')].filter(n => !n.children.length && CLUB_LINE.test(n.textContent.trim()) && !n.closest('.r230'));
     let T = 0, lastSig = '', lastForecast = '';
+    // picks the overlay saw being made: position -> player (matched by initials against the pool on offer at the time)
+    const memo = {}; let prevPool = [];
 
     const run = () => {
       const cards = [], unmatched = []; const seen = {};
@@ -142,11 +181,37 @@
       }
       const top = Object.entries(seen).sort((a, b) => b[1] - a[1])[0], cur = top && top[1] > 1 ? top[0] : null;
       const resultPage = /PROJECTED RECORD/i.test(document.body.innerText);
-      // picks already placed: cards with a position label from a club other than the one being offered
-      const placed = []; const pid = new Set();
-      for (const c of cards) if (c.slot && c.k !== cur && !pid.has(c.p.playerId)) { pid.add(c.p.playerId); placed.push(c); }
-      const open = SLOTS.filter(s => !placed.some(c => c.slot === s));
+      // picks already placed: from the game's stored state, checked against the position bar;
+      // otherwise cards with a position label from another club (results-style cards)
+      const bar = resultPage ? null : readBar();
+      const stored = readStoredPicks();
+      let placed = [], pickSource = '';
+      const pid = new Set();
+      const barFilled = bar ? bar.filter(x => x.filled) : null;
+      if (stored.picks.length && (!barFilled || (stored.picks.length === barFilled.length && barFilled.every(b => stored.picks.some(q => q.slot === b.slot && initials(q.p) === b.top))))) {
+        placed = stored.picks.map(q => ({ p: q.p, slot: q.slot })); pickSource = `picks from game storage (${placed.length})`;
+      } else {
+        for (const c of cards) if (c.slot && c.k !== cur && !pid.has(c.p.playerId)) { pid.add(c.p.playerId); placed.push(c); }
+        pickSource = placed.length ? `picks from page (${placed.length})` : '';
+      }
+      if (barFilled) {
+        for (const s of Object.keys(memo)) if (!barFilled.some(b => b.slot === s && b.top === initials(memo[s]))) delete memo[s];
+        for (const b of barFilled) if (!memo[b.slot]) {
+          const m = prevPool.filter(p => initials(p) === b.top && fits(p, b.slot));
+          if (m.length === 1) memo[b.slot] = m[0];
+        }
+        if (!placed.length && barFilled.length && barFilled.every(b => memo[b.slot])) {
+          placed = barFilled.map(b => ({ p: memo[b.slot], slot: b.slot })); pickSource = `picks seen by the overlay (${placed.length})`;
+        }
+      }
+      placed.forEach(c => pid.add(c.p.playerId));
+      const unknownPicks = barFilled && barFilled.length > placed.length;
+      if (unknownPicks) pickSource = `PICKS NOT IDENTIFIED: bar shows ${barFilled.length} filled (${barFilled.map(b => b.top + ' ' + b.slot).join(', ')}), found ${placed.length}${stored.note ? '; ' + stored.note : ''}`;
+      const open = bar ? bar.filter(x => !x.filled).map(x => x.slot) : SLOTS.filter(s => !placed.some(c => c.slot === s));
+      const round = +(document.body.innerText.match(/Round (\d)\/5/) || [])[1] || null;
+      if (round && SLOTS.length - open.length !== round - 1) pickSource += ` / CHECK: round ${round} but ${SLOTS.length - open.length} positions filled`;
       const pool = cur ? byPool.get(cur) || [] : [];
+      if (pool.length) prevPool = pool;
       const st = { open, clubs: new Set(placed.map(c => c.p.teamAbbr)), decs: placed.map(c => c.p.decade), players: pid,
         logsum: placed.reduce((a, c) => a + Math.log(R1(c.p, c.slot)), 0), club: cur?.split('|')[0], dec: cur ? +cur.split('|')[1] : null };
 
@@ -181,7 +246,8 @@
         if (rec) z += `<br>\u2605\u2605 Pick: <b>${esc(rec.p.name)}</b> at ${rec.s} (${rec.r.toFixed(1)})`;
         // forecast only when the situation changes
         const sig = placed.map(c => c.p.playerId + c.slot).sort().join() + '|' + cur;
-        if (sig !== lastSig) {
+        if (unknownPicks) { lastSig = ''; lastForecast = `<hr style="border:0;border-top:1px solid #456;margin:5px 0"><b style="color:#ffb74d">No forecast:</b> the players already picked couldn't be identified, so the team rating so far is unknown. Best picks above only use open positions. Run the bookmarklet before your first pick and it will follow every pick.`; }
+        else if (sig !== lastSig) {
           lastSig = sig;
           const mxAll = maxFree(st), mxHere = maxHere(st, pool);
           const pTake = simulate(st, 'take'), pClub = simulate(st, 'club'), pEra = simulate(st, 'era');
@@ -200,6 +266,7 @@
         }
         z += lastForecast;
       } else z = 'No pick list yet - spin';
+      if (pickSource) z += `<br><small>${esc(pickSource)}</small>`;
       z += `<br><small>${esc(src)} / cards ${cards.length} / unmatched ${unmatched.length}${unmatched.length ? ': ' + esc(unmatched.slice(0, 3).join(', ')) : ''}</small>`;
       if (P.innerHTML !== z) P.innerHTML = z;
       ob.takeRecords();
