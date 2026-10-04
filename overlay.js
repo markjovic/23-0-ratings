@@ -12,7 +12,7 @@
   const DECADES = [1990, 2000, 2010, 2020];
   const CLUB_LINE = /^([A-Z]{2,3}) \u00b7 (\d{4})s$/;
   const SLOT_LINE = /^(DEF|MID|RUC|FWD|UTL)$/;
-  const VERSION = 'v8';
+  const VERSION = 'v10';
   const SIMS_PICK = 500;        // simulated futures per candidate pick
 
   // ---------- panel ----------
@@ -154,40 +154,64 @@
     // ---------- the position bar at the bottom of the pick screen ----------
     // Each slot shows two lines: initials + position when filled, position + position when empty.
     const readBar = () => {
-      const hits = [...document.body.querySelectorAll('*')].filter(el => {
-        if (el.closest('.r230') || el === P || P.contains?.(el)) return false;
-        const t = (el.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
-        return t.length === 2 && SLOT_LINE.test(t[1]) && /^[A-Z]{2,3}$/.test(t[0]);
-      });
-      const deepest = hits.filter(el => !hits.some(o => o !== el && el.contains?.(o)));
-      const slots = deepest.map(el => { const [top, slot] = el.innerText.split('\n').map(x => x.trim()).filter(Boolean); return { top, slot, filled: top !== slot, el }; });
-      return new Set(slots.map(x => x.slot)).size === 5 && slots.length === 5 ? slots : null;
+      // Works for the phone's bottom bar (filled "PR / DEF", empty "DEF / DEF") and the tablet's field view
+      // (filled "PR / DEF", empty just "DEF"). The five positions must sit together in one container.
+      const lines = el => (el.innerText || '').split('\n').map(x => x.trim()).filter(Boolean);
+      const all = [...document.body.querySelectorAll('*')].filter(el => !el.closest('.r230') && el !== P && !P.contains?.(el));
+      const two = all.filter(el => { const t = lines(el); return t.length === 2 && SLOT_LINE.test(t[1]) && /^[A-Z]{2,3}$/.test(t[0]); });
+      const twoDeep = two.filter(el => !two.some(o => o !== el && el.contains?.(o)));
+      const one = all.filter(el => { const t = lines(el); return t.length === 1 && SLOT_LINE.test(t[0]) && !twoDeep.some(b => b === el || b.contains?.(el)); });
+      const oneDeep = one.filter(el => !one.some(o => o !== el && el.contains?.(o)));
+      const cands = [...twoDeep, ...oneDeep].map(el => { const t = lines(el); return t.length === 2 ? { top: t[0], slot: t[1], filled: t[0] !== t[1], el } : { top: t[0], slot: t[0], filled: false, el }; });
+      // anchor on UTL, which only appears in the position area, and find the smallest container holding all five
+      for (const u of cands.filter(c => c.slot === 'UTL')) {
+        for (let a = u.el.parentElement; a && a !== document.body; a = a.parentElement) {
+          const inside = cands.filter(c => a.contains?.(c.el));
+          if (inside.length < 5) continue;
+          const slots = new Set(inside.map(c => c.slot));
+          if (inside.length === 5 && slots.size === 5) return inside;
+          break;   // this container also holds other position labels, so it isn't the position area
+        }
+      }
+      return null;
     };
     // Turn anything that looks like a pick ({playerId, teamId, decade} or {player:{...}}) into a player stint.
     const asPick = o => {
-      if (!o || typeof o !== 'object') return null;
-      const q = o.player && typeof o.player === 'object' ? { ...o.player, ...o } : o;
-      const id = q.playerId ?? q.player?.playerId ?? (typeof q.player === 'number' ? q.player : undefined);
-      if (id == null) return null;
-      const teamId = q.teamId ?? q.team?.id ?? q.team?.teamId, decade = q.decade ?? q.era;
-      const m = PL.filter(p => p.playerId === +id && (teamId == null || p.teamId === +teamId) && (decade == null || p.decade === +decade));
+      if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+      const pl = o.player && typeof o.player === 'object' ? o.player : null;
+      const id = o.playerId ?? pl?.playerId ?? pl?.id ?? (typeof o.player === 'number' ? o.player : undefined)
+        ?? (o.id != null && (o.decade != null || o.teamId != null || o.era != null) && typeof o.name === 'string' ? o.id : undefined);
+      const teamId = o.teamId ?? pl?.teamId ?? o.team?.id ?? o.team?.teamId ?? (typeof o.team === 'number' ? o.team : undefined);
+      const decade = o.decade ?? pl?.decade ?? o.era ?? (typeof o.era === 'string' ? parseInt(o.era) : undefined);
+      let m = [];
+      if (id != null) m = PL.filter(p => p.playerId === +id && (teamId == null || p.teamId === +teamId) && (decade == null || p.decade === +decade));
+      if (m.length !== 1) {   // fall back to name + club/era if the object carries those
+        const name = pl?.name ?? o.name, abbr = o.teamAbbr ?? pl?.teamAbbr ?? o.team?.abbr ?? o.club;
+        if (typeof name === 'string' && (abbr || decade)) m = PL.filter(p => p.name === name && (abbr == null || p.teamAbbr === abbr) && (decade == null || p.decade === +decade));
+      }
       return m.length === 1 ? m[0] : null;
     };
-    // The game is a React app: each position in the bar is rendered from the pick it holds,
-    // so the pick can be read from the component data attached to that element.
-    const reactPick = el => {
+    // The game is a React app. Starting at a bar position, walk up its components and search their props
+    // and state for pick objects; keep the ones whose initials (and position, if given) match that bar slot.
+    const reactPick = (el, top, slot) => {
       const fk = Object.keys(el).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
       if (!fk) return { p: null, react: false };
+      const found = new Map(), seen = new Set(); let budget = 6000;
+      const scan = (v, depth) => {
+        if (!v || typeof v !== 'object' || depth > 5 || seen.has(v) || --budget < 0) return;
+        seen.add(v);
+        if (v.$$typeof || v.nodeType) return;                       // skip React elements and DOM nodes
+        const p = asPick(v);
+        if (p && initials(p) === top) { const pos = v.position ?? v.slot ?? v.pos; if (pos == null || pos === slot) found.set(p.playerId + '|' + p.teamId + '|' + p.decade, p); }
+        for (const w of Array.isArray(v) ? v : Object.values(v)) scan(w, depth + 1);
+      };
       let f = el[fk];
-      for (let i = 0; i < 25 && f; i++, f = f.return) {
-        const props = f.memoizedProps; if (!props || typeof props !== 'object') continue;
-        const vals = [props, ...Object.values(props)];
-        for (const v of vals) {
-          const p = asPick(v); if (p) return { p, react: true };
-          if (v && typeof v === 'object' && !Array.isArray(v)) for (const w of Object.values(v)) { const p2 = asPick(w); if (p2) return { p: p2, react: true }; }
-        }
+      for (let i = 0; i < 40 && f && budget > 0; i++, f = f.return) {
+        scan(f.memoizedProps, 0);
+        for (let h = f.memoizedState, n = 0; h && typeof h === 'object' && n < 30; h = h.next, n++) scan(h.memoizedState, 0);
+        if (found.size === 1) break;
       }
-      return { p: null, react: true };
+      return { p: found.size === 1 ? [...found.values()][0] : null, react: true, many: found.size > 1 };
     };
 
     // The game keeps its state in localStorage "undefeated"; look there for the picks made so far.
@@ -243,8 +267,9 @@
       // 1) the game's own data behind each filled position in the bar
       let reactSeen = false;
       if (barFilled && barFilled.length) {
-        const got = barFilled.map(b => { const r = reactPick(b.el); reactSeen = reactSeen || r.react; return r.p && initials(r.p) === b.top ? { p: r.p, slot: b.slot } : null; });
+        const got = barFilled.map(b => { const r = reactPick(b.el, b.top, b.slot); reactSeen = reactSeen || r.react; return r.p ? { p: r.p, slot: b.slot } : null; });
         if (got.every(Boolean)) { placed = got; pickSource = `picks read from the game page (${placed.length})`; }
+        else got.forEach((g, i) => { if (g && !memo[barFilled[i].slot]) memo[barFilled[i].slot] = g.p; });   // partial: keep what was found
       }
       if (placed.length) { /* done */ }
       else if (stored.picks.length && (!barFilled || (stored.picks.length === barFilled.length && barFilled.every(b => stored.picks.some(q => q.slot === b.slot && initials(q.p) === b.top))))) {
