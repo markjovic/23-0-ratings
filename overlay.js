@@ -13,6 +13,8 @@
   const DECADES = [1990, 2000, 2010, 2020];
   const CLUB_LINE = /^([A-Z]{2,3}) \u00b7 (\d{4})s$/;
   const SLOT_LINE = /^(DEF|MID|RUC|FWD|UTL)$/;
+  const VERSION = 'v3';
+  const SIMS_PICK = 500;        // simulated futures per candidate pick
 
   // ---------- panel ----------
   const P = document.createElement('div');
@@ -79,21 +81,33 @@
     };
     const nextDecade = (decs, exclude) => { const un = DECADES.filter(d => !decs.includes(d) && d !== exclude); return un.length ? rnd(un) : rnd(DECADES.filter(d => d !== exclude)); };
 
-    function simulate(st, action) {
+    // first: {p, s} = take that player at that position now; 'club' / 'era' = use that re-roll now
+    function simulate(st, first, sims) {
       let ok = 0;
-      for (let n = 0; n < SIMS; n++) {
+      for (let n = 0; n < sims; n++) {
         const open = new Set(st.open), clubs = new Set(st.clubs), decs = [...st.decs], players = new Set(st.players); let logsum = st.logsum;
-        const place = (club, dec) => { const b = bestPlace(byPool.get(`${club}|${dec}`) || [], open, players); if (!b) return false;
-          open.delete(b.s); clubs.add(club); decs.push(dec); players.add(b.p.playerId); logsum += Math.log(b.r); return true; };
-        let alive = true;
-        if (action === 'take') alive = place(st.club, st.dec);
-        else if (action === 'club') { const cs = offerable(st.dec, open, clubs, st.club); alive = cs.length ? place(rnd(cs), st.dec) : false; }
-        else if (action === 'era') { const ds = DECADES.filter(d => d !== st.dec && offerable(d, open, clubs).includes(st.club)); alive = ds.length ? place(st.club, (ds.filter(d => !decs.includes(d)).length ? rnd(ds.filter(d => !decs.includes(d))) : rnd(ds))) : false; }
+        const take = (p, s, club, dec) => { open.delete(s); clubs.add(club); decs.push(dec); players.add(p.playerId); logsum += Math.log(R1(p, s)); return true; };
+        const place = (club, dec) => { const b = bestPlace(byPool.get(`${club}|${dec}`) || [], open, players); return b ? take(b.p, b.s, club, dec) : false; };
+        let alive;
+        if (first === 'club') { const cs = offerable(st.dec, open, clubs, st.club); alive = cs.length ? place(rnd(cs), st.dec) : false; }
+        else if (first === 'era') { const ds = DECADES.filter(d => d !== st.dec && offerable(d, open, clubs).includes(st.club)); const un = ds.filter(d => !decs.includes(d)); alive = ds.length ? place(st.club, rnd(un.length ? un : ds)) : false; }
+        else alive = take(first.p, first.s, st.club, st.dec);
         while (alive && open.size) { const d = nextDecade(decs); const cs = offerable(d, open, clubs); if (!cs.length) { alive = false; break; } alive = place(rnd(cs), d); }
         if (alive && new Set(decs).size === 4 && logsum >= LOGT) ok++;
       }
-      return ok / SIMS;
+      return ok / sims;
     }
+    // re-roll buttons: true = available, false = used up, null = button not found
+    const readRerolls = () => {
+      const out = {};
+      for (const name of ['Club', 'Era']) {
+        const b = [...document.body.querySelectorAll('button')].find(x => (x.textContent || '').trim() === name);
+        if (!b) { out[name] = null; continue; }
+        const op = typeof getComputedStyle === 'function' ? parseFloat(getComputedStyle(b).opacity || '1') : 1;
+        out[name] = !(b.disabled || b.getAttribute?.('aria-disabled') === 'true' || op < 0.75);
+      }
+      return out;
+    };
 
     // highest team rating still reachable from st, choosing any unused clubs and eras
     function maxFree(st) {
@@ -165,7 +179,7 @@
 
     // ---------- page reading ----------
     const leafs = e => [...e.querySelectorAll('*')].filter(n => !n.children.length && CLUB_LINE.test(n.textContent.trim()) && !n.closest('.r230'));
-    let T = 0, lastSig = '', lastForecast = '';
+    let T = 0, lastSig = '', lastForecast = '', lastRec = null;
     // picks the overlay saw being made: position -> player (matched by initials against the pool on offer at the time)
     const memo = {}; let prevPool = [];
 
@@ -215,10 +229,48 @@
       const st = { open, clubs: new Set(placed.map(c => c.p.teamAbbr)), decs: placed.map(c => c.p.decade), players: pid,
         logsum: placed.reduce((a, c) => a + Math.log(R1(c.p, c.slot)), 0), club: cur?.split('|')[0], dec: cur ? +cur.split('|')[1] : null };
 
-      // best pick per open position in the current pool, and the forecaster's recommended pick
-      const best = {}; let rec = null;
-      if (cur) { for (const s of open) { const e = pool.filter(p => fits(p, s)).map(p => [p, rate(p, s)]).sort((a, b) => b[1][0] - a[1][0]); if (e[0]) best[s] = e; }
-        const b = bestPlace(pool, new Set(open), pid); if (b) rec = b; }
+      // best pick per open position in the current pool
+      const best = {};
+      if (cur) for (const s of open) { const e = pool.filter(p => fits(p, s) && !pid.has(p.playerId)).map(p => [p, rate(p, s)]).sort((a, b) => b[1][0] - a[1][0]); if (e[0]) best[s] = e; }
+      const rr = cur ? readRerolls() : {};
+
+      // forecast: re-run only when picks, spin or re-roll availability change
+      let rec = null, forecast = '';
+      const HR = '<hr style="border:0;border-top:1px solid #456;margin:5px 0">';
+      if (cur && !resultPage) {
+        const sig = placed.map(c => c.p.playerId + c.slot).sort().join() + '|' + cur + '|' + open.join() + '|' + rr.Club + rr.Era;
+        if (!bar) forecast = HR + `<b style="color:#ffb74d">No forecast:</b> the position bar wasn't found, so open positions are unknown.`;
+        else if (unknownPicks) forecast = HR + `<b style="color:#ffb74d">No forecast:</b> the players already picked couldn't be identified, so the team rating so far is unknown. Run the bookmarklet before your first pick and it will follow every pick.`;
+        else if (sig === lastSig) { forecast = lastForecast; rec = lastRec; }
+        else {
+          const mxAll = maxFree(st), mxHere = maxHere(st, pool);
+          // candidate picks: the top two players for each open position on this spin
+          const cands = []; for (const s of open) for (const [p] of (best[s] || []).slice(0, 2)) cands.push({ p, s });
+          const scored = cands.map(c => ({ ...c, r: R1(c.p, c.s), pr: simulate(st, c, SIMS_PICK) })).sort((a, b) => b.pr - a.pr || b.r - a.r);
+          rec = scored[0] || null;
+          let f = HR;
+          if (mxAll === null || mxAll < THRESHOLD) f += `<b style="color:#ff8a80">23-0 is no longer possible.</b> Best reachable ${mxAll ? mxAll.toFixed(2) : '-'}, needs ${THRESHOLD}.`;
+          else {
+            f += `Best reachable: ${mxAll.toFixed(2)}; taking from this spin: ${mxHere ? mxHere.toFixed(2) : '-'}`;
+            if (!mxHere || mxHere < THRESHOLD) f += `<br><b style="color:#ff8a80">Dead spin: nothing here can lead to 23-0.</b>`;
+            f += `<br>Chance of reaching ${THRESHOLD} with each pick:`;
+            for (const c of scored.slice(0, 4)) f += `<br>&nbsp; ${c === rec ? '\u2605\u2605 ' : ''}${esc(c.p.name)} at ${c.s} (${c.r.toFixed(1)}): <b>${pct(c.pr)}</b>`;
+            const opts = [];
+            for (const [name, key] of [['Club', 'club'], ['Era', 'era']]) {
+              if (rr[name] === false) continue;                       // used up: don't offer it
+              opts.push({ name, pr: simulate(st, key, SIMS), known: rr[name] === true });
+            }
+            for (const o of opts) f += `<br>&nbsp; ${o.name} re-roll${o.known ? '' : ' (availability unknown)'}: <b>${pct(o.pr)}</b>`;
+            const top = opts.sort((a, b) => b.pr - a.pr)[0];
+            const pickP = rec ? rec.pr : 0;
+            f += `<br><b>${top && top.pr - pickP >= 0.03 ? `Use the ${top.name.toLowerCase()} re-roll (+${Math.round((top.pr - pickP) * 100)} pts).` : rec ? `Take ${esc(rec.p.name)} at ${rec.s}.` : 'Nothing to pick here.'}</b>`;
+            f += `<br>Real chance of 23-0 with that: about ${pct(Math.max(pickP, top ? top.pr : 0) * REAL_RATE)}`;
+            if (rr.Club === false && rr.Era === false) f += `<br><small>Both re-rolls used.</small>`;
+          }
+          f += `<br><small>Chances assume the best pick on each later spin and no further re-rolls; real chance uses the measured ${Math.round(REAL_RATE * 100)}% of 96.7+ teams that went 23-0.</small>`;
+          lastSig = sig; lastForecast = forecast = f; lastRec = rec;
+        }
+      }
 
       // chips and outlines
       for (const c of cards) {
@@ -241,33 +293,13 @@
         else z = `Team rating: found ${t.length} of 5 picks with a position.`;
       } else if (cur) {
         const [ab, dc] = cur.split('|');
-        z = `<b>${esc(ab)} ${dc}s</b> &middot; open: ${open.join(', ')}${placed.length ? ` &middot; picked ${placed.length}` : ''}`;
+        z = `<b>${esc(ab)} ${dc}s</b> &middot; open: ${open.join(', ') || 'none'}${placed.length ? ` &middot; picked ${placed.length}` : ''}`;
         for (const s of open) { const e = best[s]; z += `<br>${s}: ${e ? `<b>${esc(e[0][0].name)}</b> ${fmt(e[0][1])}${e[1] ? ` (next ${esc(e[1][0].name)} ${fmt(e[1][1])})` : ''}` : 'none'}`; }
-        if (rec) z += `<br>\u2605\u2605 Pick: <b>${esc(rec.p.name)}</b> at ${rec.s} (${rec.r.toFixed(1)})`;
-        // forecast only when the situation changes
-        const sig = placed.map(c => c.p.playerId + c.slot).sort().join() + '|' + cur;
-        if (unknownPicks) { lastSig = ''; lastForecast = `<hr style="border:0;border-top:1px solid #456;margin:5px 0"><b style="color:#ffb74d">No forecast:</b> the players already picked couldn't be identified, so the team rating so far is unknown. Best picks above only use open positions. Run the bookmarklet before your first pick and it will follow every pick.`; }
-        else if (sig !== lastSig) {
-          lastSig = sig;
-          const mxAll = maxFree(st), mxHere = maxHere(st, pool);
-          const pTake = simulate(st, 'take'), pClub = simulate(st, 'club'), pEra = simulate(st, 'era');
-          let f = `<hr style="border:0;border-top:1px solid #456;margin:5px 0">`;
-          if (mxAll === null || mxAll < THRESHOLD) f += `<b style="color:#ff8a80">23-0 is no longer possible.</b> Best reachable ${mxAll ? mxAll.toFixed(2) : '-'}, needs ${THRESHOLD}.`;
-          else {
-            f += `Best reachable: ${mxAll.toFixed(2)}; taking from this spin: ${mxHere ? mxHere.toFixed(2) : '-'}`;
-            if (!mxHere || mxHere < THRESHOLD) f += `<br><b style="color:#ff8a80">Dead spin: nothing here can lead to 23-0.</b> Re-roll if you can.`;
-            f += `<br>Chance the rest lets you reach ${THRESHOLD}: <b>${pct(pTake)}</b> (real 23-0 about ${pct(pTake * REAL_RATE)})`;
-            const opts = [['take this spin', pTake], ['club re-roll', pClub], ['era re-roll', pEra]].sort((a, b) => b[1] - a[1]);
-            const gain = opts[0][1] - pTake;
-            f += `<br>If re-rolls are left: club ${pct(pClub)}, era ${pct(pEra)}. <b>${opts[0][0] === 'take this spin' || gain < 0.03 ? 'Take this spin.' : `Use the ${opts[0][0]} (+${Math.round(gain * 100)} pts).`}</b>`;
-          }
-          f += `<br><small>Assumes the best pick each spin and no further re-rolls. Real chance uses the measured ${Math.round(REAL_RATE * 100)}% of 96.7+ teams that went 23-0.</small>`;
-          lastForecast = f;
-        }
-        z += lastForecast;
+        z += forecast;
+
       } else z = 'No pick list yet - spin';
       if (pickSource) z += `<br><small>${esc(pickSource)}</small>`;
-      z += `<br><small>${esc(src)} / cards ${cards.length} / unmatched ${unmatched.length}${unmatched.length ? ': ' + esc(unmatched.slice(0, 3).join(', ')) : ''}</small>`;
+      z += `<br><small>overlay ${VERSION} / ${esc(src)} / cards ${cards.length} / unmatched ${unmatched.length}${unmatched.length ? ': ' + esc(unmatched.slice(0, 3).join(', ')) : ''}</small>`;
       if (P.innerHTML !== z) P.innerHTML = z;
       ob.takeRecords();
     };
