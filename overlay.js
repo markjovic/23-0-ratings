@@ -12,13 +12,23 @@
   const DECADES = [1990, 2000, 2010, 2020];
   const CLUB_LINE = /^([A-Z]{2,3}) \u00b7 (\d{4})s$/;
   const SLOT_LINE = /^(DEF|MID|RUC|FWD|UTL)$/;
-  const VERSION = 'v6';
+  const VERSION = 'v8';
   const SIMS_PICK = 500;        // simulated futures per candidate pick
 
   // ---------- panel ----------
   const P = document.createElement('div');
   P.style.cssText = 'position:fixed;right:6px;bottom:88px;z-index:99999;background:#0b2545;color:#fff;border-radius:8px;padding:7px 9px;font:12px/1.4 system-ui,sans-serif;max-width:300px;max-height:60vh;overflow:auto;box-shadow:0 4px 16px rgba(0,0,0,.35)';
   P.textContent = '23-0 overlay loading';
+  const PANEL_CSS = P.style.cssText;
+  // full = everything; min = advice banner only; off = nothing on screen except a faint dot to bring it back
+  let mode = 'full';
+  const BTN = 'display:inline-block;min-width:22px;text-align:center;padding:1px 6px;margin-left:4px;border-radius:5px;background:rgba(255,255,255,.18);color:#fff;font:700 13px/1.4 system-ui,sans-serif;cursor:pointer';
+  const controls = () => `<div style="float:right;margin:-2px -3px 2px 6px">${mode === 'full' ? `<span data-r230="min" style="${BTN}" title="Show only the advice">&minus;</span>` : `<span data-r230="full" style="${BTN}" title="Show everything">+</span>`}<span data-r230="off" style="${BTN}" title="Hide everything for a clean screenshot">&times;</span></div>`;
+  P.addEventListener('click', e => {
+    const m = e.target.closest && e.target.closest('[data-r230]');
+    if (m) { mode = m.getAttribute('data-r230'); e.stopPropagation(); e.preventDefault(); if (window.r230rerun) window.r230rerun(); }
+    else if (mode === 'off') { mode = 'full'; if (window.r230rerun) window.r230rerun(); }
+  });
   document.body.append(P);
   const fail = msg => { P.style.background = '#8b0000'; P.textContent = '23-0 overlay FAILED: ' + msg; };
 
@@ -58,6 +68,8 @@
     for (const s of SLOTS) { const v = [...byPool.values()].map(pool => Math.max(0, ...pool.filter(p => fits(p, s)).map(p => R1(p, s)))).filter(x => x > 0); par[s] = v.reduce((a, b) => a + b, 0) / v.length; }
 
     const fmt = x => x[1] + x[0].toFixed(1);
+    // for UTL picks: the positions the player plays, e.g. (FWD) or (MID / FWD)
+    const plays = p => `(${p.eligiblePositions.join(' / ')})`;
     const col = v => v >= 97 ? 'green' : v >= 92 ? 'darkorange' : 'firebrick';
     const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
     const pct = x => Math.round(x * 100) + '%';
@@ -293,7 +305,7 @@
             opts.push({ name, pr: simulate(st, key, SIMS), known: rr[name] === true });
           }
           const top = [...opts].sort((a, b) => b.pr - a.pr)[0], pickP = rec ? rec.pr : 0;
-          const takeLine = rec ? `${esc(rec.p.name)} at ${rec.s} (${rec.r.toFixed(1)})` : 'nothing';
+          const takeLine = rec ? `${esc(rec.p.name)} ${rec.s === 'UTL' ? plays(rec.p) + ' ' : ''}at ${rec.s} (${rec.r.toFixed(1)})` : 'nothing';
           let f = HR;
           if (mxAll === null || mxAll < THRESHOLD) {
             banner = BAN(RED, '#fff', '23-0 NOT POSSIBLE', `Best team still reachable rates ${mxAll ? mxAll.toFixed(2) : '-'}; 23-0 needs ${THRESHOLD} (shows 96.7).${rec ? ` Highest-rated pick: ${takeLine}.` : ''}`);
@@ -305,11 +317,11 @@
             } else if (rec && (!mxHere || mxHere < THRESHOLD)) {
               banner = BAN(RED, '#fff', 'DEAD SPIN', `Nothing here can lead to 23-0${opts.length ? ' and a re-roll doesn\'t help enough' : ' and no re-rolls are left'}. Best pick: ${takeLine}.`);
             } else if (rec) {
-              banner = BAN(GREEN, '#fff', `TAKE ${esc(rec.p.name.toUpperCase())} AT ${rec.s}`, `Rating ${rec.r.toFixed(1)}. Chance of 23-0 from here: ${pct(pickP)}.`);
+              banner = BAN(GREEN, '#fff', `TAKE ${esc(rec.p.name.toUpperCase())} ${rec.s === 'UTL' ? plays(rec.p) + ' ' : ''}AT ${rec.s}`, `Rating ${rec.r.toFixed(1)}. Chance of 23-0 from here: ${pct(pickP)}.`);
             } else banner = BAN(GREY, '#fff', 'NOTHING TO PICK', 'No player here fits an open position.');
             f += `Best reachable: ${mxAll.toFixed(2)}; taking from this spin: ${mxHere ? mxHere.toFixed(2) : '-'}`;
             f += `<br>Chance of 23-0 with each choice:`;
-            for (const c of scored.slice(0, 4)) f += `<br>&nbsp; ${c === rec ? '\u2605\u2605 ' : ''}${esc(c.p.name)} at ${c.s} (${c.r.toFixed(1)}): <b>${pct(c.pr)}</b>`;
+            for (const c of scored.slice(0, 4)) f += `<br>&nbsp; ${c === rec ? '\u2605\u2605 ' : ''}${esc(c.p.name)} ${c.s === 'UTL' ? plays(c.p) + ' ' : ''}at ${c.s} (${c.r.toFixed(1)}): <b>${pct(c.pr)}</b>`;
             for (const o of opts) f += `<br>&nbsp; <span style="color:${o.name === 'Era' ? '#c4b5fd' : '#fcd34d'}">${o.name} re-roll</span>${o.known ? '' : ' (availability unknown)'}: <b>${pct(o.pr)}</b>`;
             if (!opts.length) f += `<br><small>Both re-rolls used.</small>`;
           }
@@ -319,7 +331,11 @@
       }
 
       // chips and outlines
-      for (const c of cards) {
+      if (mode === 'off') {
+        for (const g of document.body.querySelectorAll('.r230')) g.remove?.();
+        for (const c of cards) if (c.d.style.outline) c.d.style.outline = '';
+      }
+      else for (const c of cards) {
         const stars = c.k === cur ? SLOTS.filter(s => best[s]?.[0]?.[0] === c.p) : [];
         const isRec = rec && c.k === cur && rec.p === c.p;
         const ol = isRec ? '3px solid gold' : stars.length ? '3px solid limegreen' : '';
@@ -340,15 +356,22 @@
       } else if (cur) {
         const [ab, dc] = cur.split('|');
         z = banner + `<b>${esc(ab)} ${dc}s</b> &middot; open: ${open.join(', ') || 'none'}${placed.length ? ` &middot; picked ${placed.length}` : ''}`;
-        for (const s of open) { const e = best[s]; z += `<br>${s}: ${e ? `<b>${esc(e[0][0].name)}</b> ${fmt(e[0][1])}${e[1] ? ` (next ${esc(e[1][0].name)} ${fmt(e[1][1])})` : ''}` : 'none'}`; }
+        for (const s of open) { const e = best[s]; z += `<br>${s}: ${e ? `<b>${esc(e[0][0].name)}</b> ${fmt(e[0][1])}${s === 'UTL' ? ` ${plays(e[0][0])}` : ''}${e[1] ? ` (next ${esc(e[1][0].name)} ${fmt(e[1][1])})` : ''}` : 'none'}`; }
         z += forecast;
 
       } else z = 'No pick list yet - spin';
       if (pickSource) z += `<br><small>${esc(pickSource)}</small>`;
       z += `<br><small>overlay ${VERSION} / ${esc(src)} / cards ${cards.length} / unmatched ${unmatched.length}${unmatched.length ? ': ' + esc(unmatched.slice(0, 3).join(', ')) : ''}</small>`;
+      if (mode === 'off') { z = ''; P.style.cssText = 'position:fixed;right:2px;bottom:50%;z-index:99999;width:12px;height:12px;border-radius:50%;background:#0b2545;opacity:.3;cursor:pointer'; P.title = 'Show 23-0 overlay'; }
+      else {
+        P.style.cssText = PANEL_CSS;
+        if (mode === 'min') z = controls() + (banner || (resultPage ? z.split('<br>')[0] : '<b>23-0 overlay</b>'));
+        else z = controls() + z;
+      }
       if (P.innerHTML !== z) P.innerHTML = z;
       ob.takeRecords();
     };
+    window.r230rerun = () => { lastSig = ''; try { run(); } catch (e) { fail(e.message); } };
     const ob = new MutationObserver(() => { clearTimeout(T); T = setTimeout(() => { try { run(); } catch (e) { fail(e.message); } }, 150); });
     ob.observe(document.body, { childList: true, subtree: true, characterData: true });
     run();
